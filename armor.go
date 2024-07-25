@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -13,43 +13,46 @@ import (
 
 const chunkSize = 4096 // 4KB chunks
 
+// crlfWriter wraps an io.Writer and ensures CRLF line endings
+type crlfWriter struct {
+	w io.Writer
+}
+
+func (cw *crlfWriter) Write(p []byte) (n int, err error) {
+	// Replace LF with CRLF
+	p = bytes.ReplaceAll(p, []byte{'\n'}, []byte{'\r', '\n'})
+	return cw.w.Write(p)
+}
+
 func encode(input io.Reader, output io.Writer) error {
-	bufOutput := bufio.NewWriter(output)
+	// Create a buffer to capture the output
+	var buf bytes.Buffer
 	
-	w, err := armor.Encode(bufOutput, "PGP MESSAGE", nil)
+	// Wrap the buffer with our crlfWriter
+	crlfOutput := &crlfWriter{w: &buf}
+
+	w, err := armor.Encode(crlfOutput, "PGP MESSAGE", nil)
 	if err != nil {
 		return err
 	}
 
-	buf := make([]byte, chunkSize)
-	for {
-		n, err := input.Read(buf)
-		if err != nil && err != io.EOF {
-			return err
-		}
-		if n == 0 {
-			break
-		}
-
-		_, err = w.Write(buf[:n])
-		if err != nil {
-			return err
-		}
-
-		if err == io.EOF {
-			break
-		}
+	_, err = io.Copy(w, input)
+	if err != nil {
+		return err
 	}
 
+	// Close the armor writer
 	if err := w.Close(); err != nil {
 		return err
 	}
 
-	if _, err := bufOutput.Write([]byte("\r\n")); err != nil {
-		return err
-	}
+	// Trim any trailing newlines and add a single CRLF
+	trimmedOutput := bytes.TrimRight(buf.Bytes(), "\r\n")
+	trimmedOutput = append(trimmedOutput, '\r', '\n')
 
-	return bufOutput.Flush()
+	// Write the final output
+	_, err = output.Write(trimmedOutput)
+	return err
 }
 
 func decode(input io.Reader, output io.Writer) error {
@@ -58,26 +61,8 @@ func decode(input io.Reader, output io.Writer) error {
 		return err
 	}
 
-	buf := make([]byte, chunkSize)
-	for {
-		n, err := dec.Body.Read(buf)
-		if err != nil && err != io.EOF {
-			return err
-		}
-		if n == 0 {
-			break
-		}
-
-		_, err = output.Write(buf[:n])
-		if err != nil {
-			return err
-		}
-
-		if err == io.EOF {
-			break
-		}
-	}
-	return nil
+	_, err = io.Copy(output, dec.Body)
+	return err
 }
 
 func printUsage() {
