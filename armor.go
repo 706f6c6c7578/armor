@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -11,15 +11,45 @@ import (
 	"golang.org/x/crypto/openpgp/armor"
 )
 
+const chunkSize = 4096 // 4KB chunks
+
 func encode(input io.Reader, output io.Writer) error {
-	w, err := armor.Encode(output, "PGP MESSAGE", nil)
+	bufOutput := bufio.NewWriter(output)
+	
+	w, err := armor.Encode(bufOutput, "PGP MESSAGE", nil)
 	if err != nil {
 		return err
 	}
-	defer w.Close()
 
-	_, err = io.Copy(w, input)
-	return err
+	buf := make([]byte, chunkSize)
+	for {
+		n, err := input.Read(buf)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+
+		_, err = w.Write(buf[:n])
+		if err != nil {
+			return err
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		return err
+	}
+
+	if _, err := bufOutput.Write([]byte("\r\n")); err != nil {
+		return err
+	}
+
+	return bufOutput.Flush()
 }
 
 func decode(input io.Reader, output io.Writer) error {
@@ -27,8 +57,27 @@ func decode(input io.Reader, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(output, dec.Body)
-	return err
+
+	buf := make([]byte, chunkSize)
+	for {
+		n, err := dec.Body.Read(buf)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+
+		_, err = output.Write(buf[:n])
+		if err != nil {
+			return err
+		}
+
+		if err == io.EOF {
+			break
+		}
+	}
+	return nil
 }
 
 func printUsage() {
@@ -45,7 +94,7 @@ func main() {
 	flag.Parse()
 
 	var input io.Reader
-	var output io.Writer
+	var output io.Writer = os.Stdout
 
 	if flag.NArg() > 1 {
 		fmt.Fprintf(os.Stderr, "Error: Too many arguments\n\n")
@@ -54,10 +103,8 @@ func main() {
 	}
 
 	if flag.NArg() == 0 {
-		// No file provided, use stdin
 		input = os.Stdin
 	} else {
-		// Read from file
 		file, err := os.Open(flag.Arg(0))
 		if err != nil {
 			log.Fatalf("Error opening file: %v", err)
@@ -65,10 +112,6 @@ func main() {
 		defer file.Close()
 		input = file
 	}
-
-	// Use a buffer as output
-	var buf bytes.Buffer
-	output = &buf
 
 	var err error
 	if *decodeFlag {
@@ -79,13 +122,5 @@ func main() {
 
 	if err != nil {
 		log.Fatalf("Error: %v", err)
-	}
-
-	// Write the buffer content to stdout
-	fmt.Print(buf.String())
-
-	// Add CRLF only for encoded (armored) output
-	if !*decodeFlag {
-		fmt.Print("\r\n")
 	}
 }
